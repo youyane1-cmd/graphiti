@@ -121,6 +121,8 @@ celerybeat.pid
 
 # Environments
 .env
+# 内部联调用：允许提交 LOCOMO 示例配置
+!examples/locomo/.env
 .venv
 env/
 venv/
