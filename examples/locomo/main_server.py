@@ -12,7 +12,8 @@ from pathlib import Path
 from time import time
 from typing import Any, cast
 
-from fastapi import FastAPI, HTTPException, Request  # pyright: ignore[reportMissingImports]
+from fastapi import FastAPI, HTTPException, Query, Request  # pyright: ignore[reportMissingImports]
+from fastapi.responses import HTMLResponse  # pyright: ignore[reportMissingImports]
 from graphiti_core import Graphiti
 from graphiti_core.edges import EntityEdge
 from graphiti_core.nodes import EntityNode, EpisodeType
@@ -82,6 +83,27 @@ class ClearMemoryResponse(BaseModel):
     group_id: str
     deleted: bool
     progress_deleted: bool
+
+
+class GraphNodeView(BaseModel):
+    uuid: str
+    name: str
+    summary: str = ''
+    label: str = 'Entity'
+
+
+class GraphEdgeView(BaseModel):
+    uuid: str
+    source: str
+    target: str
+    name: str = ''
+    fact: str = ''
+
+
+class GraphViewResponse(BaseModel):
+    group_id: str
+    nodes: list[GraphNodeView]
+    edges: list[GraphEdgeView]
 
 
 class SearchRequest(BaseModel):
@@ -302,6 +324,204 @@ async def clear_memory(request: ClearMemoryRequest, http_request: Request) -> Cl
         deleted=True,
         progress_deleted=progress_deleted,
     )
+
+
+async def load_graph_view(graphiti: Graphiti, group_id: str, limit: int) -> GraphViewResponse:
+    node_records, _, _ = await graphiti.driver.execute_query(
+        """
+        MATCH (n:Entity)
+        WHERE n.group_id = $group_id
+        RETURN n.uuid AS uuid, n.name AS name, n.summary AS summary
+        LIMIT $limit
+        """,
+        group_id=group_id,
+        limit=limit,
+    )
+    edge_records, _, _ = await graphiti.driver.execute_query(
+        """
+        MATCH (a:Entity)-[r:RELATES_TO]->(b:Entity)
+        WHERE r.group_id = $group_id
+        RETURN r.uuid AS uuid, a.uuid AS source, b.uuid AS target, r.name AS name, r.fact AS fact
+        LIMIT $limit
+        """,
+        group_id=group_id,
+        limit=limit,
+    )
+
+    nodes = [
+        GraphNodeView(
+            uuid=str(row.get('uuid') or ''),
+            name=str(row.get('name') or ''),
+            summary=str(row.get('summary') or ''),
+            label='Entity',
+        )
+        for row in (node_records or [])
+        if row.get('uuid')
+    ]
+    edges = [
+        GraphEdgeView(
+            uuid=str(row.get('uuid') or ''),
+            source=str(row.get('source') or ''),
+            target=str(row.get('target') or ''),
+            name=str(row.get('name') or ''),
+            fact=str(row.get('fact') or ''),
+        )
+        for row in (edge_records or [])
+        if row.get('uuid') and row.get('source') and row.get('target')
+    ]
+    return GraphViewResponse(group_id=group_id, nodes=nodes, edges=edges)
+
+
+@app.get('/memory/graph', response_model=GraphViewResponse)
+async def graph_view(
+    http_request: Request,
+    group_id: str = Query(..., min_length=1),
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> GraphViewResponse:
+    graphiti = get_graphiti(http_request)
+    return await load_graph_view(graphiti, group_id, limit)
+
+
+@app.get('/memory/ui', response_class=HTMLResponse)
+async def graph_ui() -> str:
+    return """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Graphiti Memory Graph</title>
+  <style>
+    body { margin: 0; font-family: sans-serif; background: #0f1419; color: #e7ecf3; }
+    .bar { display: flex; gap: 8px; padding: 12px; background: #1a2332; align-items: center; }
+    input, button { padding: 8px 10px; border-radius: 6px; border: 1px solid #334155; background: #0f1419; color: #e7ecf3; }
+    button { cursor: pointer; background: #2563eb; border-color: #2563eb; }
+    #status { margin-left: auto; opacity: 0.8; font-size: 13px; }
+    #canvas { width: 100vw; height: calc(100vh - 56px); display: block; background: #0b1016; }
+    #panel { position: absolute; right: 12px; top: 68px; width: 320px; max-height: calc(100vh - 90px);
+      overflow: auto; background: rgba(26,35,50,0.95); border: 1px solid #334155; border-radius: 8px; padding: 12px; display: none; }
+  </style>
+</head>
+<body>
+  <div class="bar">
+    <label>group_id</label>
+    <input id="groupId" value="demo_user_0" style="min-width: 220px;" />
+    <button id="loadBtn">加载图谱</button>
+    <span id="status">FalkorDB 自带 UI 不可用时，用这个页面查看</span>
+  </div>
+  <canvas id="canvas"></canvas>
+  <div id="panel"></div>
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const panel = document.getElementById('panel');
+    const status = document.getElementById('status');
+    let nodes = [], edges = [], selected = null;
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight - 56;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    function layout() {
+      const w = canvas.width, h = canvas.height;
+      nodes.forEach((n, i) => {
+        const angle = (i / Math.max(nodes.length, 1)) * Math.PI * 2;
+        const radius = Math.min(w, h) * 0.32;
+        n.x = w / 2 + Math.cos(angle) * radius;
+        n.y = h / 2 + Math.sin(angle) * radius;
+        n.vx = 0; n.vy = 0;
+      });
+    }
+
+    function tick() {
+      const nodeMap = Object.fromEntries(nodes.map(n => [n.uuid, n]));
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const a = nodes[i], b = nodes[j];
+          let dx = a.x - b.x, dy = a.y - b.y;
+          let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          const force = 8000 / (dist * dist);
+          dx /= dist; dy /= dist;
+          a.vx += dx * force; a.vy += dy * force;
+          b.vx -= dx * force; b.vy -= dy * force;
+        }
+      }
+      edges.forEach(e => {
+        const a = nodeMap[e.source], b = nodeMap[e.target];
+        if (!a || !b) return;
+        let dx = b.x - a.x, dy = b.y - a.y;
+        let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const force = (dist - 140) * 0.01;
+        dx /= dist; dy /= dist;
+        a.vx += dx * force; a.vy += dy * force;
+        b.vx -= dx * force; b.vy -= dy * force;
+      });
+      nodes.forEach(n => {
+        n.vx *= 0.85; n.vy *= 0.85;
+        n.x += n.vx; n.y += n.vy;
+        n.x = Math.max(30, Math.min(canvas.width - 30, n.x));
+        n.y = Math.max(30, Math.min(canvas.height - 30, n.y));
+      });
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const nodeMap = Object.fromEntries(nodes.map(n => [n.uuid, n]));
+      ctx.strokeStyle = '#475569';
+      ctx.lineWidth = 1.2;
+      edges.forEach(e => {
+        const a = nodeMap[e.source], b = nodeMap[e.target];
+        if (!a || !b) return;
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      });
+      nodes.forEach(n => {
+        ctx.beginPath();
+        ctx.fillStyle = selected && selected.uuid === n.uuid ? '#60a5fa' : '#38bdf8';
+        ctx.arc(n.x, n.y, 10, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#e2e8f0';
+        ctx.font = '12px sans-serif';
+        ctx.fillText(n.name || n.uuid.slice(0, 8), n.x + 12, n.y + 4);
+      });
+    }
+
+    function loop() { tick(); draw(); requestAnimationFrame(loop); }
+    loop();
+
+    canvas.addEventListener('click', (ev) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = ev.clientX - rect.left, y = ev.clientY - rect.top;
+      selected = nodes.find(n => Math.hypot(n.x - x, n.y - y) < 14) || null;
+      if (!selected) { panel.style.display = 'none'; return; }
+      const related = edges.filter(e => e.source === selected.uuid || e.target === selected.uuid);
+      panel.style.display = 'block';
+      panel.innerHTML = `<h3>${selected.name || selected.uuid}</h3>
+        <p>${selected.summary || '无摘要'}</p>
+        <h4>相关边 (${related.length})</h4>
+        ${related.map(e => `<p>• ${e.fact || e.name || e.uuid}</p>`).join('') || '<p>无</p>'}`;
+    });
+
+    document.getElementById('loadBtn').onclick = async () => {
+      const groupId = document.getElementById('groupId').value.trim();
+      if (!groupId) return;
+      status.textContent = '加载中...';
+      try {
+        const res = await fetch('/memory/graph?group_id=' + encodeURIComponent(groupId) + '&limit=200');
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        nodes = data.nodes || [];
+        edges = data.edges || [];
+        layout();
+        status.textContent = `节点 ${nodes.length} / 边 ${edges.length}`;
+      } catch (err) {
+        status.textContent = '加载失败: ' + err;
+      }
+    };
+  </script>
+</body>
+</html>"""
 
 
 @app.post('/memory/search', response_model=SearchResponse)

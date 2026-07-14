@@ -3,8 +3,8 @@ services:
   falkordb:
     image: docker.m.daocloud.io/falkordb/falkordb:latest
     ports:
+      # 数据库端口；内置 Browser(3000) 在当前镜像里有问题，可视化改用 API: http://host:18003/memory/ui
       - "18004:6379"
-      - "18005:3000"
     environment:
       BROWSER: "1"
       ENCRYPTION_KEY: ${FALKORDB_ENCRYPTION_KEY:-graphiti-local-encryption-key}
