@@ -57,13 +57,9 @@ Create the host directories first:
 先创建宿主机目录：
 
 ```bash
-sudo mkdir -p /data/graphti/falkordb /data/graphti/falkordb-browser /data/graphti/register_progress
+sudo mkdir -p /data/graphti/falkordb /data/graphti/register_progress
 sudo chmod -R 777 /data/graphti
 ```
-
-Browser UI is a separate container (`falkordb-browser`) on host port `18005`.
-
-可视化 UI 是独立容器 `falkordb-browser`，宿主机端口 `18005`。
 
 
 

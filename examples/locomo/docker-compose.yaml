@@ -1,12 +1,15 @@
 services:
-  # DaoCloud 白名单只有一体镜像 falkordb/falkordb；关掉内置 Browser，只当数据库用
+  # 只走国内 DaoCloud 白名单镜像；内置 Browser 一起用，不再额外拉 falkordb-browser
   falkordb:
     image: docker.m.daocloud.io/falkordb/falkordb:latest
     ports:
       - "18004:6379"
+      - "18005:3000"
     environment:
-      BROWSER: "0"
+      BROWSER: "1"
+      ENCRYPTION_KEY: ${FALKORDB_ENCRYPTION_KEY:-graphiti-local-encryption-key}
     volumes:
+      # 只持久化图谱数据；Browser UI 每次连库加载，不单独持久化
       - /data/graphti/falkordb:/data
     healthcheck:
       test: ["CMD", "redis-cli", "-p", "6379", "ping"]
@@ -14,20 +17,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-
-  # 单独可视化 UI；DaoCloud 没有这个镜像，走 Docker Hub 官方源
-  falkordb-browser:
-    image: falkordb/falkordb-browser:latest
-    ports:
-      - "18005:3000"
-    environment:
-      FALKORDB_URL: redis://falkordb:6379
-      ENCRYPTION_KEY: ${FALKORDB_ENCRYPTION_KEY:-graphiti-local-encryption-key}
-    volumes:
-      - /data/graphti/falkordb-browser:/app/.data
-    depends_on:
-      falkordb:
-        condition: service_healthy
 
   memory-api:
     build:
