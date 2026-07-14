@@ -2,7 +2,7 @@
 
 import requests
 
-API_BASE_URL = 'http://127.0.0.1:18003'
+API_BASE_URL = 'http://10.110.159.20:18003'
 
 payload = {
     'messages': [

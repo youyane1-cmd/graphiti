@@ -46,11 +46,26 @@ docker compose -f examples/locomo/docker-compose.yaml up --build
 
 This starts both FalkorDB and the memory API. Host ports start from `18003`:
 API `http://127.0.0.1:18003`, FalkorDB `18004`, FalkorDB Browser `18005`.
-Graph data is persisted in the `falkordb-data` Docker volume.
+Data is bind-mounted to host folders under `/data/graphti/`.
 
 这会同时启动 FalkorDB 和 memory API。宿主机端口从 `18003` 起：
 API `http://127.0.0.1:18003`，FalkorDB `18004`，FalkorDB Browser `18005`。
-图数据会持久化到 `falkordb-data` Docker volume。
+数据会映射到宿主机目录 `/data/graphti/`。
+
+Create the host directories first:
+
+先创建宿主机目录：
+
+```bash
+sudo mkdir -p /data/graphti/falkordb /data/graphti/falkordb-browser /data/graphti/register_progress
+sudo chmod -R 777 /data/graphti
+```
+
+Browser UI is a separate container (`falkordb-browser`) on host port `18005`.
+
+可视化 UI 是独立容器 `falkordb-browser`，宿主机端口 `18005`。
+
+
 
 If you want to start FalkorDB manually instead:
 

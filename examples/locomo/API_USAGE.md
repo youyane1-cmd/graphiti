@@ -1,22 +1,28 @@
-﻿# Graphiti Memory API 调用说明
+# Graphiti Memory API 调用说明
 
 本文档对应 `examples/locomo/main_server.py` 提供的本地接口服务。
 
 ## 服务地址
 
-本地默认调用地址：
+Docker Compose 启动后的默认调用地址（宿主机映射端口）：
 
 ```text
-http://127.0.0.1:8000
+http://127.0.0.1:18003
 ```
 
 如果远端机器要调用你的服务，需要把 `127.0.0.1` 换成你这台机器在局域网或服务器上的 IP，例如：
 
 ```text
-http://你的机器IP:8000
+http://你的机器IP:18003
 ```
 
-服务启动命令：
+Docker Compose 启动：
+
+```powershell
+docker compose -f examples/locomo/docker-compose.yaml up --build -d
+```
+
+如果不用 Docker、本机直接跑脚本，默认仍是 `8000`：
 
 ```powershell
 uv sync --extra locomo
@@ -28,6 +34,7 @@ uv run python examples/locomo/main_server.py
 ```powershell
 uv run uvicorn examples.locomo.main_server:app --host 0.0.0.0 --port 8000
 ```
+
 
 ## 通用说明
 
@@ -49,7 +56,7 @@ GET /health
 ### 示例
 
 ```bash
-curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:18003/health
 ```
 
 ### 响应
@@ -130,7 +137,7 @@ group_id       <- message.group_id
 ```python
 import requests
 
-api_base_url = "http://127.0.0.1:8000"
+api_base_url = "http://127.0.0.1:18003"
 
 payload = {
     "messages": [
@@ -199,7 +206,7 @@ Content-Type: application/json
 ```python
 import requests
 
-api_base_url = "http://127.0.0.1:8000"
+api_base_url = "http://127.0.0.1:18003"
 
 payload = {
     "group_id": "locomo_experiment_user_0",
@@ -281,7 +288,7 @@ Content-Type: application/json
 ```python
 import requests
 
-api_base_url = "http://127.0.0.1:8000"
+api_base_url = "http://127.0.0.1:18003"
 
 payload = {
     "group_id": "locomo_experiment_user_0",
@@ -390,7 +397,7 @@ Content-Type: application/json
 ```python
 import requests
 
-api_base_url = "http://127.0.0.1:8000"
+api_base_url = "http://127.0.0.1:18003"
 
 payload = {
     "group_id": "locomo_experiment_user_0",
@@ -447,11 +454,11 @@ print(response.json())
 本机调用：
 
 ```python
-API_BASE_URL = "http://127.0.0.1:8000"
+API_BASE_URL = "http://127.0.0.1:18003"
 ```
 
 远端调用时，把 IP 改成运行服务的机器 IP：
 
 ```python
-API_BASE_URL = "http://你的机器IP:8000"
+API_BASE_URL = "http://你的机器IP:18003"
 ```

@@ -1,18 +1,31 @@
 services:
+  # 只跑数据库，不带一体镜像里有问题的 Browser
   falkordb:
-    # 走 DaoCloud Docker Hub 代理，国内拉取更快
-    image: docker.m.daocloud.io/falkordb/falkordb:latest
+    image: docker.m.daocloud.io/falkordb/falkordb-server:latest
     ports:
       - "18004:6379"
-      - "18005:3000"
     volumes:
-      - falkordb-data:/data
+      - /data/graphti/falkordb:/data
     healthcheck:
       test: ["CMD", "redis-cli", "-p", "6379", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  # 单独起可视化 UI，连上面的 falkordb
+  falkordb-browser:
+    image: docker.m.daocloud.io/falkordb/falkordb-browser:latest
+    ports:
+      - "18005:3000"
+    environment:
+      FALKORDB_URL: redis://falkordb:6379
+      ENCRYPTION_KEY: ${FALKORDB_ENCRYPTION_KEY:-graphiti-local-encryption-key}
+    volumes:
+      - /data/graphti/falkordb-browser:/app/.data
+    depends_on:
+      falkordb:
+        condition: service_healthy
 
   memory-api:
     build:
@@ -28,7 +41,7 @@ services:
     ports:
       - "18003:8000"
     volumes:
-      - register-progress:/app/examples/locomo/data/register_progress
+      - /data/graphti/register_progress:/app/examples/locomo/data/register_progress
     depends_on:
       falkordb:
         condition: service_healthy
@@ -47,7 +60,3 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
-
-volumes:
-  falkordb-data:
-  register-progress:
