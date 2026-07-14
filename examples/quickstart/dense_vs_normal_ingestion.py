@@ -227,7 +227,32 @@ Assistant: For CI/CD with ECS Fargate, I recommend AWS CodePipeline integrated w
 
 
 async def main():
-    graphiti = Graphiti(neo4j_uri, neo4j_user, neo4j_password)
+    #graphiti = Graphiti(neo4j_uri, neo4j_user, neo4j_password)
+    llm_config = LLMConfig(
+    api_key='你的_api_key',
+    model='你的_llm_模型名',
+    small_model='你的_llm_模型名',
+    base_url='你的_base_url/v1',
+)
+
+    llm_client = OpenAIGenericClient(config=llm_config)
+
+    embedder = OpenAIEmbedder(
+        config=OpenAIEmbedderConfig(
+            api_key='你的_api_key',
+            embedding_model='你的_embedding_模型名',
+            embedding_dim=384,  # 改成你的 embedding 实际维度
+            base_url='你的_base_url/v1',
+        )
+    )
+
+    graphiti = Graphiti(
+        neo4j_uri,
+        neo4j_user,
+        neo4j_password,
+        llm_client=llm_client,
+        embedder=embedder,
+)
 
     try:
         #################################################

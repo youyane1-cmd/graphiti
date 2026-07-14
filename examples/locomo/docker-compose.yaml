@@ -1,0 +1,53 @@
+services:
+  falkordb:
+    # 走 DaoCloud Docker Hub 代理，国内拉取更快
+    image: docker.m.daocloud.io/falkordb/falkordb:latest
+    ports:
+      - "18004:6379"
+      - "18005:3000"
+    volumes:
+      - falkordb-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  memory-api:
+    build:
+      context: ../..
+      dockerfile: examples/locomo/Dockerfile
+    env_file:
+      - .env
+    environment:
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: "6379"
+      MEMORY_API_HOST: 0.0.0.0
+      MEMORY_API_PORT: "8000"
+    ports:
+      - "18003:8000"
+    volumes:
+      - register-progress:/app/examples/locomo/data/register_progress
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "uv",
+          "run",
+          "--no-sync",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  falkordb-data:
+  register-progress:
