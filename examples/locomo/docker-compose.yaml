@@ -1,9 +1,11 @@
 services:
-  # 只跑数据库，不带一体镜像里有问题的 Browser
+  # DaoCloud 白名单只有一体镜像 falkordb/falkordb；关掉内置 Browser，只当数据库用
   falkordb:
-    image: docker.m.daocloud.io/falkordb/falkordb-server:latest
+    image: docker.m.daocloud.io/falkordb/falkordb:latest
     ports:
       - "18004:6379"
+    environment:
+      BROWSER: "0"
     volumes:
       - /data/graphti/falkordb:/data
     healthcheck:
@@ -13,9 +15,9 @@ services:
       retries: 5
       start_period: 10s
 
-  # 单独起可视化 UI，连上面的 falkordb
+  # 单独可视化 UI；DaoCloud 没有这个镜像，走 Docker Hub 官方源
   falkordb-browser:
-    image: docker.m.daocloud.io/falkordb/falkordb-browser:latest
+    image: falkordb/falkordb-browser:latest
     ports:
       - "18005:3000"
     environment:
