@@ -104,6 +104,10 @@ class GraphEdgeView(BaseModel):
     target: str
     name: str = ''
     fact: str = ''
+    valid_at: datetime | None = None
+    invalid_at: datetime | None = None
+    created_at: datetime | None = None
+    expired_at: datetime | None = None
 
 
 class GraphViewResponse(BaseModel):
@@ -359,7 +363,15 @@ async def load_graph_view(graphiti: Graphiti, group_id: str, limit: int) -> Grap
         """
         MATCH (a:Entity)-[r:RELATES_TO]->(b:Entity)
         WHERE r.group_id = $group_id
-        RETURN r.uuid AS uuid, a.uuid AS source, b.uuid AS target, r.name AS name, r.fact AS fact
+        RETURN r.uuid AS uuid,
+               a.uuid AS source,
+               b.uuid AS target,
+               r.name AS name,
+               r.fact AS fact,
+               r.valid_at AS valid_at,
+               r.invalid_at AS invalid_at,
+               r.created_at AS created_at,
+               r.expired_at AS expired_at
         LIMIT $limit
         """,
         group_id=group_id,
@@ -383,6 +395,10 @@ async def load_graph_view(graphiti: Graphiti, group_id: str, limit: int) -> Grap
             target=str(row.get('target') or ''),
             name=str(row.get('name') or ''),
             fact=str(row.get('fact') or ''),
+            valid_at=row.get('valid_at'),
+            invalid_at=row.get('invalid_at'),
+            created_at=row.get('created_at'),
+            expired_at=row.get('expired_at'),
         )
         for row in (edge_records or [])
         if row.get('uuid') and row.get('source') and row.get('target')
@@ -509,17 +525,32 @@ async def graph_ui() -> str:
     function loop() { tick(); draw(); requestAnimationFrame(loop); }
     loop();
 
+    function formatTime(value) {
+      return value ? new Date(value).toLocaleString() : '无';
+    }
+
     canvas.addEventListener('click', (ev) => {
       const rect = canvas.getBoundingClientRect();
       const x = ev.clientX - rect.left, y = ev.clientY - rect.top;
       selected = nodes.find(n => Math.hypot(n.x - x, n.y - y) < 14) || null;
       if (!selected) { panel.style.display = 'none'; return; }
+      const nodeMap = Object.fromEntries(nodes.map(n => [n.uuid, n]));
       const related = edges.filter(e => e.source === selected.uuid || e.target === selected.uuid);
       panel.style.display = 'block';
       panel.innerHTML = `<h3>${selected.name || selected.uuid}</h3>
         <p>${selected.summary || '无摘要'}</p>
         <h4>相关边 (${related.length})</h4>
-        ${related.map(e => `<p>• ${e.fact || e.name || e.uuid}</p>`).join('') || '<p>无</p>'}`;
+        ${related.map(e => {
+          const sourceName = nodeMap[e.source]?.name || e.source;
+          const targetName = nodeMap[e.target]?.name || e.target;
+          return `<div style="border-top:1px solid #334155;padding:8px 0">
+            <strong>${sourceName} → ${targetName}</strong>
+            <div>关系：${e.name || '未命名'}</div>
+            <div>事实：${e.fact || '无'}</div>
+            <div>有效时间：${formatTime(e.valid_at)} ～ ${formatTime(e.invalid_at)}</div>
+            <div>系统时间：${formatTime(e.created_at)} ～ ${formatTime(e.expired_at)}</div>
+          </div>`;
+        }).join('') || '<p>无</p>'}`;
     });
 
     document.getElementById('loadBtn').onclick = async () => {

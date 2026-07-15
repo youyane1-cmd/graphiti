@@ -670,11 +670,18 @@ curl "http://服务器IP:18003/memory/graph?user_id=demo_user_0&limit=200"
       "source": "alice-uuid",
       "target": "necklace-uuid",
       "name": "BOUGHT",
-      "fact": "Alice bought a shell necklace."
+      "fact": "Alice bought a shell necklace.",
+      "valid_at": "2024-01-08T10:00:00Z",
+      "invalid_at": null,
+      "created_at": "2026-07-15T06:40:00Z",
+      "expired_at": null
     }
   ]
 }
 ```
+
+图形页面点击实体后，会显示相关事实边的方向、关系类型、事实内容，以及事件时间线
+（`valid_at` / `invalid_at`）和系统时间线（`created_at` / `expired_at`）。
 
 ### `GET /memory/ui`
 

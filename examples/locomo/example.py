@@ -1,4 +1,4 @@
-"""Call the add, search, and response endpoints with one demo user."""
+"""Reset one demo user, then call the add, search, and response endpoints."""
 
 import json
 
@@ -16,6 +16,10 @@ def post(path: str, payload: dict) -> dict:
 
 
 def main() -> None:
+    delete_result = post('/memory/delete', {'user_id': USER_ID})
+    print('POST /memory/delete')
+    print(json.dumps(delete_result, ensure_ascii=False, indent=2))
+
     add_result = post(
         '/memory/add',
         {
@@ -39,7 +43,7 @@ def main() -> None:
             'source_description': 'demo message',
         },
     )
-    print('POST /memory/add')
+    print('\nPOST /memory/add')
     print(json.dumps(add_result, ensure_ascii=False, indent=2))
 
     search_result = post(

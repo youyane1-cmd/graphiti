@@ -477,11 +477,19 @@ print(response.json())
       "source": "alice-uuid",
       "target": "necklace-uuid",
       "name": "BOUGHT",
-      "fact": "Alice bought a shell necklace."
+      "fact": "Alice bought a shell necklace.",
+      "valid_at": "2024-01-08T10:00:00Z",
+      "invalid_at": null,
+      "created_at": "2026-07-15T06:40:00Z",
+      "expired_at": null
     }
   ]
 }
 ```
+
+事实边同时返回事件时间线（`valid_at` / `invalid_at`）和系统时间线
+（`created_at` / `expired_at`）。图形页面点击实体节点后，会显示相关边的方向、关系类型、
+事实内容和这两组时间。
 
 ## 7. 浏览器可视化页面
 
