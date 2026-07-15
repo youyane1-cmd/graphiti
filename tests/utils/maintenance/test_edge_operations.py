@@ -167,7 +167,8 @@ async def test_resolve_extracted_edges_keeps_unknown_names(monkeypatch):
         return [await aw for aw in aws]
 
     monkeypatch.setattr(edge_ops, 'semaphore_gather', immediate_gather)
-    monkeypatch.setattr(edge_ops, 'search', AsyncMock(return_value=SearchResults()))
+    search_mock = AsyncMock(return_value=SearchResults())
+    monkeypatch.setattr(edge_ops, 'search', search_mock)
 
     llm_client = MagicMock()
     llm_client.generate_response = AsyncMock(
@@ -234,6 +235,9 @@ async def test_resolve_extracted_edges_keeps_unknown_names(monkeypatch):
     assert resolved_edges[0].name == 'INTERACTED_WITH'
     assert invalidated_edges == []
     assert new_edges == resolved_edges  # No duplicates, so all edges are new
+    # With no edges between the extracted nodes, only the invalidation search should run.
+    # The duplicate-candidate full-text search must be skipped instead of querying with [].
+    assert search_mock.await_count == 1
 
 
 @pytest.mark.asyncio

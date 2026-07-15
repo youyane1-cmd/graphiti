@@ -417,7 +417,21 @@ print(response.json())
     {
       "question": "What did the user buy in Hawaii?",
       "answer": "A shell necklace.",
-      "duration_ms": 2340.1
+      "duration_ms": 2340.1,
+      "search_result": {
+        "query": "What did the user buy in Hawaii?",
+        "context": "FACTS and ENTITIES ...",
+        "duration_ms": 123.4,
+        "facts": [
+          {
+            "uuid": "fact-uuid",
+            "fact": "The user bought a shell necklace in Hawaii.",
+            "valid_at": "2024-01-01T12:00:00Z",
+            "invalid_at": null
+          }
+        ],
+        "nodes": []
+      }
     }
   ]
 }
@@ -432,6 +446,7 @@ print(response.json())
 - `results[].question`：本次问题。
 - `results[].answer`：服务生成的回答。
 - `results[].duration_ms`：本条问题的端到端耗时，包含内部 search 和 LLM answer。
+- `results[].search_result`：生成回答前使用的完整检索结果，包含 context、facts、nodes 和检索耗时。
 
 ## 6. 查看图谱 JSON
 

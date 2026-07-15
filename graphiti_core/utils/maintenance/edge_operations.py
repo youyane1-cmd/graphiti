@@ -389,15 +389,23 @@ async def resolve_extracted_edges(
                         valid_edges_list[i].append(oe)
                         existing_uuids.add(oe.uuid)
 
+    async def search_related_edges(
+        extracted_edge: EntityEdge, valid_edges: list[EntityEdge]
+    ) -> SearchResults:
+        if not valid_edges:
+            return SearchResults()
+
+        return await search(
+            clients,
+            extracted_edge.fact,
+            group_ids=[extracted_edge.group_id],
+            config=EDGE_HYBRID_SEARCH_RRF,
+            search_filter=SearchFilters(edge_uuids=[edge.uuid for edge in valid_edges]),
+        )
+
     related_edges_results: list[SearchResults] = await semaphore_gather(
         *[
-            search(
-                clients,
-                extracted_edge.fact,
-                group_ids=[extracted_edge.group_id],
-                config=EDGE_HYBRID_SEARCH_RRF,
-                search_filter=SearchFilters(edge_uuids=[edge.uuid for edge in valid_edges]),
-            )
+            search_related_edges(extracted_edge, valid_edges)
             for extracted_edge, valid_edges in zip(extracted_edges, valid_edges_list, strict=True)
         ]
     )

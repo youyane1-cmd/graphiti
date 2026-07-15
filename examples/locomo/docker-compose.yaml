@@ -8,6 +8,8 @@ services:
     environment:
       BROWSER: "1"
       ENCRYPTION_KEY: ${FALKORDB_ENCRYPTION_KEY:-graphiti-local-encryption-key}
+      # FalkorDB 图查询超时，单位毫秒；默认值过短时 Graphiti 全文检索容易被终止
+      FALKORDB_ARGS: "TIMEOUT 3000000"
     volumes:
       # 只持久化图谱数据；Browser UI 每次连库加载，不单独持久化
       - /data/graphti/falkordb:/data

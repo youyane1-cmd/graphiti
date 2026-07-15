@@ -234,11 +234,14 @@ uv run python -m examples.locomo.locomo_ingestion
 - 每个 LOCOMO 用户生成一个 `group_id`。
 - 每条对话消息写成一个 `EpisodeType.message`。
 - Graphiti 调用你的 LLM 和 embedding 接口抽取图谱。
-- 抽取后的节点、边、事实和向量写入 Docker FalkorDB 容器里的 `graphiti_memory` 这张 graph。
-- `graphiti_memory` 里不是每个用户单独一张图，而是所有节点和边都带 `group_id` 属性；检索时用 `group_ids=[...]` 过滤。
-
-注意：外部接口中同一个 `user_id` 的消息必须顺序写入，不要并发写入。服务内部会将
-`user_id` 映射为 Graphiti 的 `group_id`。
+- 服务会把外部 `user_id` 映射为 Graphiti 的 `group_id`，并为每个用户固定选择同名的
+  FalkorDB graph，避免不同用户的数据和 driver 相互串扰。
+- 同一个 `user_id` 的 add、delete、search、response 和 graph 操作由用户级锁顺序执行，
+  保证消息和上下文顺序稳定。
+- 不同 `user_id` 使用不同的 Graphiti 视图和用户级锁，可以并发执行；它们共享底层
+  FalkorDB 连接、LLM、embedding 和 reranker 客户端，不会为每个请求重复建立连接。
+- 每个用户第一次调用接口时会懒创建 Graphiti 视图，并在对应 FalkorDB graph 中初始化
+  索引和约束。
 
 ## 6. 阶段二：检索上下文
 
@@ -634,7 +637,21 @@ reference_time <- timestamp
     {
       "question": "What did the user buy in Hawaii?",
       "answer": "A shell necklace.",
-      "duration_ms": 2340.1
+      "duration_ms": 2340.1,
+      "search_result": {
+        "query": "What did the user buy in Hawaii?",
+        "context": "FACTS and ENTITIES ...",
+        "duration_ms": 123.4,
+        "facts": [
+          {
+            "uuid": "fact-uuid",
+            "fact": "The user bought a shell necklace in Hawaii.",
+            "valid_at": "2024-01-01T12:00:00Z",
+            "invalid_at": null
+          }
+        ],
+        "nodes": []
+      }
     }
   ]
 }
