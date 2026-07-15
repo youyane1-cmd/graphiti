@@ -40,6 +40,8 @@ uv run uvicorn examples.locomo.main_server:app --host 0.0.0.0 --port 8000
 
 - 请求体和响应体均为 JSON。
 - OpenAI、embedding、FalkorDB 等连接参数不放在请求体里，统一从本机 `examples/locomo/.env` 读取。
+- `LLM_MODEL` 用于写入抽取和最终回答；`CROSS_ENCODER_MODEL` 单独用于事实重排，
+  推荐设为支持 `logit_bias` 和 `logprobs` 的 `gpt-4.1-nano`。
 - 对外接口统一使用 `user_id`，必填且不能为空；服务内部将它映射为 Graphiti 的 `group_id`。
 - 当前所有数据都写入 FalkorDB 的同一张 graph：`graphiti_memory`。
 - 内部 `group_id` 不是数据库名，也不是 graph 名；它是节点和边上的属性。检索时服务会用它过滤。

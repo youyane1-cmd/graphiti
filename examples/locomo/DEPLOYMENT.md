@@ -147,6 +147,7 @@ OPENAI_BASE_URL=http://10.112.86.11:80/v1
 
 LLM_MODEL=your-chat-model
 SMALL_LLM_MODEL=your-chat-model
+CROSS_ENCODER_MODEL=gpt-4.1-nano
 EMBEDDING_MODEL=your-embedding-model
 EMBEDDING_DIM=1024
 
@@ -161,6 +162,8 @@ STRUCTURED_OUTPUT_MODE=json_schema
 - `FALKORDB_DATABASE`：FalkorDB 里的 graph 名字，默认使用 `graphiti_memory`，可按环境覆盖。
 - `LLM_MODEL`：你的接口支持的聊天模型名。
 - `SMALL_LLM_MODEL`：小任务模型名，可以先和 `LLM_MODEL` 一样。
+- `CROSS_ENCODER_MODEL`：事实重排模型，必须支持 `logit_bias`、`logprobs` 和
+  `top_logprobs`；推荐 `gpt-4.1-nano`。
 - `EMBEDDING_MODEL`：你的接口支持的 embedding 模型名。
 - `EMBEDDING_DIM`：embedding 模型输出维度，必须填真实维度，比如 `768`、`1024`、`1536`。
 - `STRUCTURED_OUTPUT_MODE`：如果你的模型不稳定支持 `json_schema`，可以改成 `json_object`。
@@ -699,7 +702,8 @@ http://10.110.159.20:18003/memory/ui
 
 完整跑通建议按这个顺序：
 
-1. 配置 `examples/locomo/.env`，确认 `LLM_MODEL`、`EMBEDDING_MODEL`、`EMBEDDING_DIM` 可用。
+1. 配置 `examples/locomo/.env`，确认 `LLM_MODEL`、`CROSS_ENCODER_MODEL`、
+   `EMBEDDING_MODEL`、`EMBEDDING_DIM` 可用。
 2. 创建数据目录：`sudo mkdir -p /data/graphti/falkordb /data/graphti/register_progress && sudo chmod -R 777 /data/graphti`。
 3. 在 `examples/locomo` 下执行 `docker compose up --build -d`。
 4. 检查健康：`curl http://服务器IP:18003/health`。

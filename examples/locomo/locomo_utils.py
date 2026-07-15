@@ -155,6 +155,7 @@ def build_graphiti_client() -> Graphiti:
     base_url = env('OPENAI_BASE_URL', required=True)
     llm_model = env('LLM_MODEL', required=True)
     small_llm_model = env('SMALL_LLM_MODEL', llm_model)
+    cross_encoder_model = env('CROSS_ENCODER_MODEL', 'gpt-4.1-nano')
     embedding_model = env('EMBEDDING_MODEL', required=True)
     embedding_dim = int(env('EMBEDDING_DIM', '1024'))
     structured_output_mode_value = env('STRUCTURED_OUTPUT_MODE', 'json_schema')
@@ -174,6 +175,12 @@ def build_graphiti_client() -> Graphiti:
         config=llm_config,
         structured_output_mode=structured_output_mode,
     )
+    cross_encoder_config = LLMConfig(
+        api_key=api_key,
+        model=cross_encoder_model,
+        base_url=base_url,
+        temperature=0,
+    )
     embedder = OpenAIEmbedder(
         config=OpenAIEmbedderConfig(
             api_key=api_key,
@@ -182,7 +189,10 @@ def build_graphiti_client() -> Graphiti:
             base_url=base_url,
         )
     )
-    cross_encoder = OpenAIRerankerClient(config=llm_config, client=llm_client.client)
+    cross_encoder = OpenAIRerankerClient(
+        config=cross_encoder_config,
+        client=llm_client.client,
+    )
 
     graph_driver = FalkorDriver(
         host=env('FALKORDB_HOST', 'localhost'),
