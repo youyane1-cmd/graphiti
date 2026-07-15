@@ -12,6 +12,8 @@ from time import time
 
 from openai import AsyncOpenAI
 
+from graphiti_core.request_usage import record_chat_completion_usage
+
 from examples.locomo.locomo_utils import (
     env,
     load_environment,
@@ -83,6 +85,7 @@ async def locomo_response(llm_client: AsyncOpenAI, model: str, context: str, que
         ],
         temperature=0,
     )
+    record_chat_completion_usage(response.usage)
     return response.choices[0].message.content or ''
 
 

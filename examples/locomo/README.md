@@ -102,15 +102,17 @@ The service exposes these endpoints:
 
 服务提供四个接口：
 
-- `POST /memory/register`: write messages into Graphiti/FalkorDB.
-- `POST /memory/clear`: delete all memories for one `group_id`.
-- `POST /memory/search`: search memories by `group_id`.
+- `POST /memory/add`: write messages into Graphiti/FalkorDB.
+- `POST /memory/delete`: delete all memories for one `user_id`.
+- `POST /memory/search`: search memories by `user_id`.
 - `POST /memory/response`: search memories and generate an answer.
 
-`group_id` is the partition key. All data is stored in the same FalkorDB graph
-`graphiti_memory`, and each node/edge is filtered by `group_id`.
+The public API uses `user_id` and maps it to Graphiti's internal `group_id` partition key.
+All data is stored in the same FalkorDB graph `graphiti_memory`, and each node/edge is
+filtered by the internal `group_id`.
 
-`group_id` 是分区键。所有数据写在同一个 FalkorDB graph：`graphiti_memory`，节点和边靠 `group_id` 过滤隔离。
+外部接口统一使用 `user_id`，服务内部将它映射为 Graphiti 的 `group_id` 分区键。所有数据写在同一个
+FalkorDB graph：`graphiti_memory`，节点和边靠内部 `group_id` 过滤隔离。
 
 To run the script pipeline that mirrors the Zep LOCOMO scripts:
 

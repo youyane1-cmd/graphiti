@@ -17,6 +17,7 @@ from fastapi.responses import HTMLResponse  # pyright: ignore[reportMissingImpor
 from graphiti_core import Graphiti
 from graphiti_core.edges import EntityEdge
 from graphiti_core.nodes import EntityNode, EpisodeType
+from graphiti_core.request_usage import CURRENT_REQUEST_USAGE, RequestUsage
 from graphiti_core.search.search_config_recipes import (
     EDGE_HYBRID_SEARCH_CROSS_ENCODER,
     NODE_HYBRID_SEARCH_RRF,
@@ -32,6 +33,10 @@ ENV_PATH = EXAMPLE_DIR / '.env'
 REGISTER_PROGRESS_DIR = EXAMPLE_DIR / 'data' / 'register_progress'
 DEFAULT_SERVER_HOST = '0.0.0.0'
 DEFAULT_SERVER_PORT = 8000
+SEARCH_RESULT_LIMIT = 20
+# Graphiti mutates its shared driver when switching group_id/database. Serialize graph operations
+# so concurrent requests cannot switch that driver while another operation is still using it.
+GRAPHITI_OPERATION_LOCK = asyncio.Lock()
 
 SEARCH_CONTEXT_TEMPLATE = """
 FACTS and ENTITIES represent relevant context to the current conversation.
@@ -54,33 +59,34 @@ Timestamps in memories represent the actual time the event occurred, not the tim
 
 
 class RegisterMessage(BaseModel):
-    group_idx: int
-    group_id: str
-    session_idx: int
-    msg_idx: int
-    speaker: str
-    text: str
-    episode_body: str
-    reference_time: datetime
+    session_idx: int = Field(..., ge=0)
+    msg_idx: int = Field(..., ge=0)
+    speaker: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1)
+    timestamp: datetime
 
 
 class RegisterRequest(BaseModel):
+    user_id: str = Field(..., min_length=1)
     messages: list[RegisterMessage] = Field(..., min_length=1)
-    source_description: str = 'LOCOMO message'
+    source_description: str = Field(..., min_length=1)
 
 
 class RegisterResponse(BaseModel):
-    group_ids: list[str]
-    ingested_count: int
-    episode_names: list[str]
+    user_id: str
+    ingested_count: str
+    duration_ms: float
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
 
 
 class ClearMemoryRequest(BaseModel):
-    group_id: str = Field(..., min_length=1)
+    user_id: str = Field(..., min_length=1)
 
 
 class ClearMemoryResponse(BaseModel):
-    group_id: str
+    user_id: str
     deleted: bool
     progress_deleted: bool
 
@@ -101,15 +107,14 @@ class GraphEdgeView(BaseModel):
 
 
 class GraphViewResponse(BaseModel):
-    group_id: str
+    user_id: str
     nodes: list[GraphNodeView]
     edges: list[GraphEdgeView]
 
 
 class SearchRequest(BaseModel):
-    group_id: str
+    user_id: str = Field(..., min_length=1)
     queries: list[str] = Field(..., min_length=1)
-    limit: int = Field(default=20, ge=1, le=100)
 
 
 class FactResult(BaseModel):
@@ -134,32 +139,34 @@ class SearchQueryResult(BaseModel):
 
 
 class SearchResponse(BaseModel):
-    group_id: str
+    user_id: str
     results: list[SearchQueryResult]
+    duration_ms: float
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
 
 
 class QAItem(BaseModel):
     question: str
-    answer: str | None = None
 
 
 class ResponseRequest(BaseModel):
-    group_id: str
+    user_id: str = Field(..., min_length=1)
     qa: list[QAItem] = Field(..., min_length=1)
-    limit: int = Field(default=20, ge=1, le=100)
 
 
 class ResponseItem(BaseModel):
     question: str
     answer: str
-    golden_answer: str | None = None
     duration_ms: float
-    facts: list[FactResult]
 
 
 class ResponseResult(BaseModel):
-    group_id: str
+    user_id: str
     results: list[ResponseItem]
+    duration_ms: float
+    total_tokens: int
 
 
 @asynccontextmanager
@@ -189,11 +196,16 @@ def get_graphiti(request: Request) -> Graphiti:
     return graphiti
 
 
-def build_episode_name(message: RegisterMessage) -> str:
-    return (
-        f'locomo_user_{message.group_idx}_'
-        f'session_{message.session_idx}_msg_{message.msg_idx}'
-    )
+def build_episode_name(user_id: str, message: RegisterMessage) -> str:
+    return f'{user_id}_session_{message.session_idx}_msg_{message.msg_idx}'
+
+
+def usage_fields(usage: RequestUsage) -> dict[str, int]:
+    return {
+        'input_tokens': usage.input_tokens,
+        'output_tokens': usage.output_tokens,
+        'total_tokens': usage.total_tokens,
+    }
 
 
 def register_progress_path(group_id: str) -> Path:
@@ -263,10 +275,11 @@ async def search_context(
     start = time()
     node_config = NODE_HYBRID_SEARCH_RRF.model_copy(update={'limit': limit})
     edge_config = EDGE_HYBRID_SEARCH_CROSS_ENCODER.model_copy(update={'limit': limit})
-    node_results, edge_results = await asyncio.gather(
-        graphiti.search_(query, config=node_config, group_ids=[group_id]),
-        graphiti.search_(query, config=edge_config, group_ids=[group_id]),
-    )
+    async with GRAPHITI_OPERATION_LOCK:
+        node_results, edge_results = await asyncio.gather(
+            graphiti.search_(query, config=node_config, group_ids=[group_id]),
+            graphiti.search_(query, config=edge_config, group_ids=[group_id]),
+        )
     duration_ms = (time() - start) * 1000
 
     return SearchQueryResult(
@@ -278,49 +291,54 @@ async def search_context(
     )
 
 
-@app.post('/memory/register', response_model=RegisterResponse)
+@app.post('/memory/add', response_model=RegisterResponse)
 async def register(request: RegisterRequest, http_request: Request) -> RegisterResponse:
     graphiti = get_graphiti(http_request)
-    group_ids = sorted({message.group_id for message in request.messages})
+    group_id = request.user_id
+    usage = RequestUsage()
+    context_token = CURRENT_REQUEST_USAGE.set(usage)
+    start = time()
+    ingested_count = 0
 
-    for message in request.messages:
-        episode_name = build_episode_name(message)
-        group_progress = load_register_progress(message.group_id)
-        if episode_name in group_progress:
-            continue
+    try:
+        async with GRAPHITI_OPERATION_LOCK:
+            for message in request.messages:
+                episode_name = build_episode_name(request.user_id, message)
+                group_progress = load_register_progress(group_id)
+                if episode_name in group_progress:
+                    continue
 
-        await graphiti.add_episode(
-            name=episode_name,
-            episode_body=message.episode_body,
-            source=EpisodeType.message,
-            source_description=request.source_description,
-            reference_time=message.reference_time,
-            group_id=message.group_id,
+                await graphiti.add_episode(
+                    name=episode_name,
+                    episode_body=f'{message.speaker}: {message.content}',
+                    source=EpisodeType.message,
+                    source_description=request.source_description,
+                    reference_time=message.timestamp,
+                    group_id=group_id,
+                )
+                group_progress.append(episode_name)
+                save_register_progress(group_id, group_progress)
+                ingested_count += 1
+
+        return RegisterResponse(
+            user_id=request.user_id,
+            ingested_count=f'{ingested_count}/{len(request.messages)}',
+            duration_ms=(time() - start) * 1000,
+            **usage_fields(usage),
         )
-        group_progress.append(episode_name)
-        save_register_progress(message.group_id, group_progress)
-
-    episode_names = [
-        episode_name
-        for group_id in group_ids
-        for episode_name in load_register_progress(group_id)
-    ]
-
-    return RegisterResponse(
-        group_ids=group_ids,
-        ingested_count=len(episode_names),
-        episode_names=episode_names,
-    )
+    finally:
+        CURRENT_REQUEST_USAGE.reset(context_token)
 
 
-@app.post('/memory/clear', response_model=ClearMemoryResponse)
+@app.post('/memory/delete', response_model=ClearMemoryResponse)
 async def clear_memory(request: ClearMemoryRequest, http_request: Request) -> ClearMemoryResponse:
     graphiti = get_graphiti(http_request)
-    await clear_data(graphiti.driver, group_ids=[request.group_id])
-    progress_deleted = delete_register_progress(request.group_id)
+    async with GRAPHITI_OPERATION_LOCK:
+        await clear_data(graphiti.driver, group_ids=[request.user_id])
+        progress_deleted = delete_register_progress(request.user_id)
 
     return ClearMemoryResponse(
-        group_id=request.group_id,
+        user_id=request.user_id,
         deleted=True,
         progress_deleted=progress_deleted,
     )
@@ -369,17 +387,18 @@ async def load_graph_view(graphiti: Graphiti, group_id: str, limit: int) -> Grap
         for row in (edge_records or [])
         if row.get('uuid') and row.get('source') and row.get('target')
     ]
-    return GraphViewResponse(group_id=group_id, nodes=nodes, edges=edges)
+    return GraphViewResponse(user_id=group_id, nodes=nodes, edges=edges)
 
 
 @app.get('/memory/graph', response_model=GraphViewResponse)
 async def graph_view(
     http_request: Request,
-    group_id: str = Query(..., min_length=1),
+    user_id: str = Query(..., min_length=1),
     limit: int = Query(default=200, ge=1, le=1000),
 ) -> GraphViewResponse:
     graphiti = get_graphiti(http_request)
-    return await load_graph_view(graphiti, group_id, limit)
+    async with GRAPHITI_OPERATION_LOCK:
+        return await load_graph_view(graphiti, user_id, limit)
 
 
 @app.get('/memory/ui', response_class=HTMLResponse)
@@ -403,8 +422,8 @@ async def graph_ui() -> str:
 </head>
 <body>
   <div class="bar">
-    <label>group_id</label>
-    <input id="groupId" value="demo_user_0" style="min-width: 220px;" />
+    <label>user_id</label>
+    <input id="userId" value="demo_user_0" style="min-width: 220px;" />
     <button id="loadBtn">加载图谱</button>
     <span id="status">FalkorDB 自带 UI 不可用时，用这个页面查看</span>
   </div>
@@ -504,11 +523,11 @@ async def graph_ui() -> str:
     });
 
     document.getElementById('loadBtn').onclick = async () => {
-      const groupId = document.getElementById('groupId').value.trim();
-      if (!groupId) return;
+      const userId = document.getElementById('userId').value.trim();
+      if (!userId) return;
       status.textContent = '加载中...';
       try {
-        const res = await fetch('/memory/graph?group_id=' + encodeURIComponent(groupId) + '&limit=200');
+        const res = await fetch('/memory/graph?user_id=' + encodeURIComponent(userId) + '&limit=200');
         if (!res.ok) throw new Error(await res.text());
         const data = await res.json();
         nodes = data.nodes || [];
@@ -527,53 +546,67 @@ async def graph_ui() -> str:
 @app.post('/memory/search', response_model=SearchResponse)
 async def search(request: SearchRequest, http_request: Request) -> SearchResponse:
     graphiti = get_graphiti(http_request)
-    results: list[SearchQueryResult] = []
+    usage = RequestUsage()
+    context_token = CURRENT_REQUEST_USAGE.set(usage)
+    start = time()
 
-    for query in request.queries:
-        results.append(await search_context(graphiti, request.group_id, query, request.limit))
+    try:
+        results: list[SearchQueryResult] = []
+        for query in request.queries:
+            results.append(await search_context(graphiti, request.user_id, query, SEARCH_RESULT_LIMIT))
 
-    return SearchResponse(
-        group_id=request.group_id,
-        results=results,
-    )
+        return SearchResponse(
+            user_id=request.user_id,
+            results=results,
+            duration_ms=(time() - start) * 1000,
+            **usage_fields(usage),
+        )
+    finally:
+        CURRENT_REQUEST_USAGE.reset(context_token)
 
 
 @app.post('/memory/response', response_model=ResponseResult)
 async def response(request: ResponseRequest, http_request: Request) -> ResponseResult:
     graphiti = get_graphiti(http_request)
-    results: list[ResponseItem] = []
+    usage = RequestUsage()
+    context_token = CURRENT_REQUEST_USAGE.set(usage)
+    start = time()
 
-    for qa in request.qa:
-        start = time()
-        search_result = await search_context(
-            graphiti,
-            request.group_id,
-            qa.question,
-            request.limit,
-        )
-
-        llm_client = cast(Any, graphiti.llm_client)
-        answer = await locomo_response(
-            llm_client.client,
-            graphiti.llm_client.model,
-            search_result.context,
-            qa.question,
-        )
-        duration_ms = (time() - start) * 1000
-        results.append(
-            ResponseItem(
-                question=qa.question,
-                answer=answer,
-                golden_answer=qa.answer,
-                duration_ms=duration_ms,
-                facts=search_result.facts,
+    try:
+        results: list[ResponseItem] = []
+        for qa in request.qa:
+            item_start = time()
+            search_result = await search_context(
+                graphiti,
+                request.user_id,
+                qa.question,
+                SEARCH_RESULT_LIMIT,
             )
-        )
 
-    return ResponseResult(
-        group_id=request.group_id,
-        results=results,
-    )
+            llm_client = cast(Any, graphiti.llm_client)
+            answer = await locomo_response(
+                llm_client.client,
+                graphiti.llm_client.model or 'gpt-4.1-mini',
+                search_result.context,
+                qa.question,
+            )
+            duration_ms = (time() - item_start) * 1000
+            results.append(
+                ResponseItem(
+                    question=qa.question,
+                    answer=answer,
+                    duration_ms=duration_ms,
+                )
+            )
+
+        return ResponseResult(
+            user_id=request.user_id,
+            results=results,
+            duration_ms=(time() - start) * 1000,
+            total_tokens=usage.total_tokens,
+        )
+    finally:
+        CURRENT_REQUEST_USAGE.reset(context_token)
 
 
 if __name__ == '__main__':

@@ -234,7 +234,8 @@ uv run python -m examples.locomo.locomo_ingestion
 - 抽取后的节点、边、事实和向量写入 Docker FalkorDB 容器里的 `graphiti_memory` 这张 graph。
 - `graphiti_memory` 里不是每个用户单独一张图，而是所有节点和边都带 `group_id` 属性；检索时用 `group_ids=[...]` 过滤。
 
-注意：同一个 `group_id` 的消息必须顺序写入，不要并发写入。Graphiti 会参考最近的历史 episode 来抽取实体和关系，并发写入会影响上下文顺序。
+注意：外部接口中同一个 `user_id` 的消息必须顺序写入，不要并发写入。服务内部会将
+`user_id` 映射为 Graphiti 的 `group_id`。
 
 ## 6. 阶段二：检索上下文
 
@@ -421,20 +422,34 @@ POST /memory/evaluate
 examples/locomo/main_server.py
 ```
 
-启动命令：
+推荐用 Docker Compose 一起启动 FalkorDB + API：
+
+```bash
+cd examples/locomo
+docker compose up --build -d
+```
+
+Compose 宿主机端口：
+
+| 服务 | 地址 |
+| --- | --- |
+| memory API | `http://服务器IP:18003` |
+| FalkorDB 数据库 | `服务器IP:18004` |
+
+本机不用 Docker 时：
 
 ```powershell
 uv sync --extra locomo
 uv run python examples/locomo/main_server.py
 ```
 
-也可以直接使用 Uvicorn 启动：
+也可以直接使用 Uvicorn 启动（默认 `8000`）：
 
 ```powershell
 uv run uvicorn examples.locomo.main_server:app --host 0.0.0.0 --port 8000
 ```
 
-远端请求体只需要传业务数据，不需要传 OpenAI、embedding、FalkorDB 连接参数。这些参数都从本机 `examples/locomo/.env` 读取。
+远端请求体只需要传业务数据，不需要传 OpenAI、embedding、FalkorDB 连接参数。这些参数都从 `examples/locomo/.env` 读取。
 
 详细接口字段说明见：
 
@@ -442,57 +457,90 @@ uv run uvicorn examples.locomo.main_server:app --host 0.0.0.0 --port 8000
 examples/locomo/API_USAGE.md
 ```
 
-### `POST /memory/register`
+当前接口一览：
 
-作用：注册并写入一批 `LocomoMessage`。服务端会按 `messages` 顺序循环调用 `graphiti.add_episode(...)`。
+| 方法 | 路径 | 作用 |
+| --- | --- | --- |
+| `GET` | `/health` | 健康检查 |
+| `POST` | `/memory/add` | 写入消息到图谱 |
+| `POST` | `/memory/delete` | 按 `user_id` 清库 |
+| `POST` | `/memory/search` | 检索记忆 |
+| `POST` | `/memory/response` | 检索并生成回答 |
+| `GET` | `/memory/graph` | 拉取某个 `user_id` 的节点和边（JSON） |
+| `GET` | `/memory/ui` | 浏览器可视化查看图谱 |
+
+说明：FalkorDB 自带 Browser UI 在当前国内镜像里可能不可用；可视化请用 `/memory/ui`。
+
+### `GET /health`
+
+作用：检查服务是否就绪。
+
+```bash
+curl http://服务器IP:18003/health
+```
+
+响应示例：
+
+```json
+{
+  "status": "ok"
+}
+```
+
+### `POST /memory/add`
+
+作用：注册并写入一个用户的一批消息。服务端会按 `messages` 顺序循环调用
+`graphiti.add_episode(...)`，将 `user_id` 映射为内部 `group_id`，并记录注册进度。
 
 请求示例：
 
 ```json
 {
+  "user_id": "locomo_experiment_user_0",
   "messages": [
     {
-      "group_idx": 0,
-      "group_id": "locomo_experiment_user_0",
       "session_idx": 1,
       "msg_idx": 0,
       "speaker": "Caroline",
-      "text": "Hey Mel! Good to see you! How have you been?",
-      "episode_body": "Caroline: Hey Mel! Good to see you! How have you been?",
-      "reference_time": "2023-05-08T13:56:00Z"
+      "content": "Hey Mel! Good to see you! How have you been?",
+      "timestamp": "2023-05-08T13:56:00Z"
     }
   ],
   "source_description": "LOCOMO message"
 }
 ```
 
-字段对应源码：
+服务端内部转换：
 
 ```text
-messages[] <- examples.locomo.locomo_utils.LocomoMessage
+group_id       <- user_id
+episode_name   <- {user_id}_session_{session_idx}_msg_{msg_idx}
+episode_body   <- "{speaker}: {content}"
+reference_time <- timestamp
 ```
 
 响应示例：
 
 ```json
 {
-  "group_ids": ["locomo_experiment_user_0"],
-  "ingested_count": 1,
-  "episode_names": [
-    "locomo_user_0_session_1_msg_0"
-  ]
+  "user_id": "locomo_experiment_user_0",
+  "ingested_count": "1/1",
+  "duration_ms": 1234.5,
+  "input_tokens": 1000,
+  "output_tokens": 200,
+  "total_tokens": 1200
 }
 ```
 
-### `POST /memory/clear`
+### `POST /memory/delete`
 
-作用：按 `group_id` 删除这个分区下的全部 Graphiti 图谱数据，并删除本地注册进度文件。适合重新导入同一个用户或同一批评测样本前使用。
+作用：按 `user_id` 删除该用户的全部 Graphiti 图谱数据，并删除本地注册进度文件。
 
 请求示例：
 
 ```json
 {
-  "group_id": "locomo_experiment_user_0"
+  "user_id": "locomo_experiment_user_0"
 }
 ```
 
@@ -500,7 +548,7 @@ messages[] <- examples.locomo.locomo_utils.LocomoMessage
 
 ```json
 {
-  "group_id": "locomo_experiment_user_0",
+  "user_id": "locomo_experiment_user_0",
   "deleted": true,
   "progress_deleted": true
 }
@@ -508,18 +556,16 @@ messages[] <- examples.locomo.locomo_utils.LocomoMessage
 
 ### `POST /memory/search`
 
-作用：给定 `group_id` 和 `queries` 数组，从 Graphiti 检索相关事实。
+作用：给定 `user_id` 和 `queries` 数组，从 Graphiti 检索相关事实和实体。
 
 请求示例：
 
 ```json
 {
-  "group_id": "locomo_experiment_user_0",
+  "user_id": "locomo_experiment_user_0",
   "queries": [
     "What important facts are known about this user?"
-  ],
-  "top_k": 20,
-  "use_advanced_search": false
+  ]
 }
 ```
 
@@ -527,13 +573,31 @@ messages[] <- examples.locomo.locomo_utils.LocomoMessage
 
 ```json
 {
-  "group_id": "locomo_experiment_user_0",
+  "user_id": "locomo_experiment_user_0",
+  "duration_ms": 456.7,
+  "input_tokens": 1000,
+  "output_tokens": 20,
+  "total_tokens": 1020,
   "results": [
     {
       "query": "What important facts are known about this user?",
-      "facts": [],
-      "nodes": [],
-      "episodes": []
+      "context": "FACTS and ENTITIES ...",
+      "duration_ms": 123.4,
+      "facts": [
+        {
+          "uuid": "fact-uuid",
+          "fact": "The user bought a shell necklace in Hawaii.",
+          "valid_at": "2024-01-01T12:00:00Z",
+          "invalid_at": null
+        }
+      ],
+      "nodes": [
+        {
+          "uuid": "node-uuid",
+          "name": "Caroline",
+          "summary": "Caroline is one speaker in the conversation."
+        }
+      ]
     }
   ]
 }
@@ -541,17 +605,18 @@ messages[] <- examples.locomo.locomo_utils.LocomoMessage
 
 ### `POST /memory/response`
 
-作用：先按 `group_id` 检索相关事实，再调用本地 `.env` 里配置的 LLM 生成回答。
+作用：先按 `user_id` 检索相关事实，再调用本地 `.env` 里配置的 LLM 生成回答。
 
 请求示例：
 
 ```json
 {
-  "group_id": "locomo_experiment_user_0",
-  "questions": [
-    "What did the user buy in Hawaii?"
-  ],
-  "top_k": 10
+  "user_id": "locomo_experiment_user_0",
+  "qa": [
+    {
+      "question": "What did the user buy in Hawaii?"
+    }
+  ]
 }
 ```
 
@@ -559,18 +624,74 @@ messages[] <- examples.locomo.locomo_utils.LocomoMessage
 
 ```json
 {
-  "group_id": "locomo_experiment_user_0",
+  "user_id": "locomo_experiment_user_0",
+  "duration_ms": 2345.6,
+  "total_tokens": 1280,
   "results": [
     {
       "question": "What did the user buy in Hawaii?",
-      "answer": "A shell necklace",
-      "facts": []
+      "answer": "A shell necklace.",
+      "duration_ms": 2340.1
     }
   ]
 }
 ```
 
-`group_id` 是分区键。当前所有用户的数据都写在 FalkorDB 的同一张 graph：`graphiti_memory` 里，节点和边靠 `group_id` 属性隔离。检索时必须传同一个 `group_id`。
+### `GET /memory/graph`
+
+作用：按 `user_id` 拉取图谱里的 Entity 节点和 RELATES_TO 边，返回 JSON。供程序查看或给
+`/memory/ui` 画图使用。
+
+请求示例：
+
+```bash
+curl "http://服务器IP:18003/memory/graph?user_id=demo_user_0&limit=200"
+```
+
+响应示例：
+
+```json
+{
+  "user_id": "demo_user_0",
+  "nodes": [
+    {
+      "uuid": "node-uuid",
+      "name": "Alice",
+      "summary": "Alice bought a shell necklace.",
+      "label": "Entity"
+    }
+  ],
+  "edges": [
+    {
+      "uuid": "edge-uuid",
+      "source": "alice-uuid",
+      "target": "necklace-uuid",
+      "name": "BOUGHT",
+      "fact": "Alice bought a shell necklace."
+    }
+  ]
+}
+```
+
+### `GET /memory/ui`
+
+作用：浏览器可视化页面。打开后输入 `user_id`，点击「加载图谱」，页面会请求
+`/memory/graph` 并画出节点和边。
+
+访问地址：
+
+```text
+http://服务器IP:18003/memory/ui
+```
+
+例如：
+
+```text
+http://10.110.159.20:18003/memory/ui
+```
+
+外部接口使用 `user_id`，服务内部将它作为 Graphiti 的 `group_id` 分区键。检索和可视化时必须
+传入注册时相同的 `user_id`。
 
 
 
@@ -578,16 +699,16 @@ messages[] <- examples.locomo.locomo_utils.LocomoMessage
 
 完整跑通建议按这个顺序：
 
-1. 运行 `uv sync --extra locomo` 安装 FalkorDB、FastAPI、Uvicorn 依赖。
-2. 用 Docker 启动 `falkordb/falkordb` 容器。
-3. 配置 `examples/locomo/.env`，默认保持 `GRAPH_BACKEND=falkordb` 即可。
-4. 确认 `LLM_MODEL`、`EMBEDDING_MODEL`、`EMBEDDING_DIM` 都是真实可用值。
-5. 如果跑脚本流程，依次运行 `locomo_ingestion.py`、`locomo_search.py`、`locomo_responses.py`。
-6. 如果跑接口服务，运行 `uv run uvicorn examples.locomo.main_server:app --host 0.0.0.0 --port 8000`。
-7. 接口模式下，远端先调 `POST /memory/register` 写入消息。
-8. 接口模式下，远端调 `POST /memory/search` 做检索测试。
-9. 接口模式下，远端调 `POST /memory/response` 生成回答。
-10. 如果要重跑同一个 `group_id`，先调 `POST /memory/clear` 清理旧数据和注册进度。
+1. 配置 `examples/locomo/.env`，确认 `LLM_MODEL`、`EMBEDDING_MODEL`、`EMBEDDING_DIM` 可用。
+2. 创建数据目录：`sudo mkdir -p /data/graphti/falkordb /data/graphti/register_progress && sudo chmod -R 777 /data/graphti`。
+3. 在 `examples/locomo` 下执行 `docker compose up --build -d`。
+4. 检查健康：`curl http://服务器IP:18003/health`。
+5. 调 `POST /memory/add` 写入消息，或运行 `examples/locomo/example.py`。
+6. 浏览器打开 `http://服务器IP:18003/memory/ui`，或调 `GET /memory/graph` 查看图谱。
+7. 调 `POST /memory/search` 做检索测试。
+8. 调 `POST /memory/response` 生成回答。
+9. 如果要重跑同一个 `user_id`，先调 `POST /memory/delete` 清理旧数据和注册进度。
+10. 如果不用 Docker，也可本机 `uv run python examples/locomo/main_server.py`，默认端口是 `8000`。
 
 
 
@@ -596,9 +717,12 @@ messages[] <- examples.locomo.locomo_utils.LocomoMessage
 
 | 原 Zep Cloud 脚本            | 作用           | 本地脚本方式                                  | 接口方式                    |
 | ------------------------- | ------------ | --------------------------------------- | ----------------------- |
-| `zep_locomo_ingestion.py` | 注册分组并摄入消息    | `examples/locomo/locomo_ingestion.py`   | `POST /memory/register` |
+| `zep_locomo_ingestion.py` | 注册分组并摄入消息    | `examples/locomo/locomo_ingestion.py`   | `POST /memory/add` |
 | `zep_locomo_search.py`    | 检索节点和边，拼接上下文 | `examples/locomo/locomo_search.py`      | `POST /memory/search`   |
 | `zep_locomo_responses.py` | 基于上下文生成回答    | `examples/locomo/locomo_responses.py`   | `POST /memory/response` |
+| -                         | 清理某个分区图谱     | -                                       | `POST /memory/delete`    |
+| -                         | 拉取图谱 JSON     | -                                       | `GET /memory/graph`     |
+| -                         | 浏览器查看图谱      | -                                       | `GET /memory/ui`        |
 | `zep_locomo_eval.py`      | 对生成回答打分      | 暂不封装                                    | 暂不封装                    |
 
 
@@ -606,7 +730,7 @@ messages[] <- examples.locomo.locomo_utils.LocomoMessage
 
 ## 12. 当前文档边界
 
-当前文档只负责说明 Docker FalkorDB 和三接口服务的本地跑通方式。
+当前文档说明 Docker FalkorDB 和 memory 接口服务的本地/服务器跑通方式。
 
 当前已经有：
 
@@ -614,6 +738,8 @@ messages[] <- examples.locomo.locomo_utils.LocomoMessage
 - 检索脚本：`examples/locomo/locomo_search.py`
 - 回答脚本：`examples/locomo/locomo_responses.py`
 - 检索冒烟测试脚本：`examples/locomo/locomo_retrieval_eval.py`
+- 最小注册示例：`examples/locomo/example.py`
 - 接口服务：`examples/locomo/main_server.py`
+- Docker：`examples/locomo/Dockerfile`、`examples/locomo/docker-compose.yaml`
 - 公共工具：`examples/locomo/locomo_utils.py`
 - 配置模板：`examples/locomo/.env.example`
