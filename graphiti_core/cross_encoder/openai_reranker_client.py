@@ -24,6 +24,7 @@ from openai import AsyncAzureOpenAI, AsyncOpenAI
 from ..helpers import semaphore_gather
 from ..llm_client import LLMConfig, OpenAIClient, RateLimitError
 from ..prompts import Message
+from ..request_usage import record_chat_completion_usage
 from .client import CrossEncoderClient
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,8 @@ class OpenAIRerankerClient(CrossEncoderClient):
                     for openai_messages in openai_messages_list
                 ]
             )
+            for response in responses:
+                record_chat_completion_usage(response.usage)
 
             responses_top_logprobs = [
                 response.choices[0].logprobs.content[0].top_logprobs
