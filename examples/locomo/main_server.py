@@ -4,6 +4,7 @@ Minimal LOCOMO API service backed by local Graphiti + Docker FalkorDB.
 
 import asyncio
 import json
+import logging
 import os
 import re
 from contextlib import asynccontextmanager
@@ -15,6 +16,13 @@ from typing import Any, cast
 
 from fastapi import FastAPI, HTTPException, Query, Request  # pyright: ignore[reportMissingImports]
 from fastapi.responses import HTMLResponse  # pyright: ignore[reportMissingImports]
+from openai import BadRequestError  # pyright: ignore[reportMissingImports]
+from pydantic import BaseModel, Field
+
+from examples.locomo.locomo_responses import (
+    locomo_response,  # pyright: ignore[reportMissingImports]
+)
+from examples.locomo.locomo_utils import build_graphiti_client, load_environment
 from graphiti_core import Graphiti
 from graphiti_core.edges import EntityEdge
 from graphiti_core.namespaces import EdgeNamespace, NodeNamespace
@@ -25,10 +33,6 @@ from graphiti_core.search.search_config_recipes import (
     NODE_HYBRID_SEARCH_RRF,
 )
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data
-from pydantic import BaseModel, Field
-
-from examples.locomo.locomo_responses import locomo_response  # pyright: ignore[reportMissingImports]
-from examples.locomo.locomo_utils import build_graphiti_client, load_environment
 
 EXAMPLE_DIR = Path(__file__).parent
 ENV_PATH = EXAMPLE_DIR / '.env'
@@ -36,6 +40,7 @@ REGISTER_PROGRESS_DIR = EXAMPLE_DIR / 'data' / 'register_progress'
 DEFAULT_SERVER_HOST = '0.0.0.0'
 DEFAULT_SERVER_PORT = 8000
 SEARCH_RESULT_LIMIT = 20
+logger = logging.getLogger('uvicorn.error')
 
 SEARCH_CONTEXT_TEMPLATE = """
 FACTS and ENTITIES represent relevant context to the current conversation.
@@ -78,6 +83,15 @@ class RegisterResponse(BaseModel):
     input_tokens: int
     output_tokens: int
     total_tokens: int
+
+
+class RegisterProgressItem(BaseModel):
+    episode_name: str
+    duration_ms: float | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    completed_at: datetime | None = None
 
 
 class ClearMemoryRequest(BaseModel):
@@ -176,14 +190,17 @@ class ResponseResult(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     load_environment(ENV_PATH)
+    logger.info('正在初始化 Graphiti Memory API')
     graphiti = build_graphiti_client()
     await graphiti.build_indices_and_constraints()
     app.state.graphiti = graphiti
     app.state.user_graphiti = {}
     app.state.user_locks = {}
+    logger.info('Graphiti Memory API 初始化完成')
     try:
         yield
     finally:
+        logger.info('正在关闭 Graphiti Memory API')
         await graphiti.close()
 
 
@@ -236,39 +253,95 @@ def usage_fields(usage: RequestUsage) -> dict[str, int]:
     }
 
 
+def is_content_filter_error(exc: BadRequestError) -> bool:
+    error_text = f'{exc} {getattr(exc, "body", None)}'.lower()
+    return 'content_filter' in error_text or 'responsibleaipolicyviolation' in error_text
+
+
 def register_progress_path(group_id: str) -> Path:
+    safe_group_id = re.sub(r'[^A-Za-z0-9_.-]+', '_', group_id)
+    return REGISTER_PROGRESS_DIR / f'{safe_group_id}_register_progress.jsonl'
+
+
+def legacy_register_progress_path(group_id: str) -> Path:
     safe_group_id = re.sub(r'[^A-Za-z0-9_.-]+', '_', group_id)
     return REGISTER_PROGRESS_DIR / f'{safe_group_id}_register_progress.json'
 
 
-def load_register_progress(group_id: str) -> list[str]:
+def parse_register_progress_item(item: object, path: Path) -> RegisterProgressItem:
+    try:
+        if isinstance(item, str):
+            return RegisterProgressItem(episode_name=item)
+        return RegisterProgressItem.model_validate(item)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500, detail=f'Invalid register progress item in: {path}'
+        ) from exc
+
+
+def write_register_progress_jsonl(group_id: str, progress: list[RegisterProgressItem]) -> None:
+    REGISTER_PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
     path = register_progress_path(group_id)
-    if not path.exists():
+    temp_path = path.with_suffix(f'{path.suffix}.tmp')
+    with temp_path.open('w', encoding='utf-8') as file:
+        for item in progress:
+            file.write(json.dumps(item.model_dump(mode='json'), ensure_ascii=False) + '\n')
+    temp_path.replace(path)
+
+
+def load_register_progress(group_id: str) -> list[RegisterProgressItem]:
+    path = register_progress_path(group_id)
+    if path.exists():
+        progress: list[RegisterProgressItem] = []
+        with path.open(encoding='utf-8') as file:
+            for line_number, line in enumerate(file, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f'Invalid register progress JSONL: {path}:{line_number}',
+                    ) from exc
+                progress.append(parse_register_progress_item(item, path))
+        return progress
+
+    legacy_path = legacy_register_progress_path(group_id)
+    if not legacy_path.exists():
         return []
 
-    with path.open(encoding='utf-8') as file:
-        progress = json.load(file)
+    with legacy_path.open(encoding='utf-8') as file:
+        legacy_progress = json.load(file)
+    if not isinstance(legacy_progress, list):
+        raise HTTPException(
+            status_code=500, detail=f'Invalid register progress file: {legacy_path}'
+        )
 
-    if not isinstance(progress, list) or not all(isinstance(item, str) for item in progress):
-        raise HTTPException(status_code=500, detail=f'Invalid register progress file: {path}')
-
+    progress = [parse_register_progress_item(item, legacy_path) for item in legacy_progress]
+    write_register_progress_jsonl(group_id, progress)
+    legacy_path.unlink()
+    logger.info('已迁移注册进度文件 JSON -> JSONL path=%s', path)
     return progress
 
 
-def save_register_progress(group_id: str, episode_names: list[str]) -> None:
+def append_register_progress(group_id: str, item: RegisterProgressItem) -> None:
     REGISTER_PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
     path = register_progress_path(group_id)
-    with path.open('w', encoding='utf-8') as file:
-        json.dump(episode_names, file, indent=2, ensure_ascii=False)
+    with path.open('a', encoding='utf-8') as file:
+        file.write(json.dumps(item.model_dump(mode='json'), ensure_ascii=False) + '\n')
 
 
 def delete_register_progress(group_id: str) -> bool:
-    path = register_progress_path(group_id)
-    if not path.exists():
-        return False
-
-    path.unlink()
-    return True
+    deleted = False
+    for path in (
+        register_progress_path(group_id),
+        legacy_register_progress_path(group_id),
+    ):
+        if path.exists():
+            path.unlink()
+            deleted = True
+    return deleted
 
 
 def fact_result_from_edge(edge) -> FactResult:
@@ -325,45 +398,125 @@ async def register(request: RegisterRequest, http_request: Request) -> RegisterR
     context_token = CURRENT_REQUEST_USAGE.set(usage)
     start = time()
     ingested_count = 0
+    total_messages = len(request.messages)
+    logger.info('开始注册记忆 user_id=%s messages=%d', group_id, total_messages)
 
     try:
         async with get_user_lock(http_request, request.user_id):
             graphiti = await get_user_graphiti(http_request, request.user_id)
-            for message in request.messages:
+            group_progress = load_register_progress(group_id)
+            completed_episode_names = {item.episode_name for item in group_progress}
+            for index, message in enumerate(request.messages, start=1):
                 episode_name = build_episode_name(request.user_id, message)
-                group_progress = load_register_progress(group_id)
-                if episode_name in group_progress:
+                if episode_name in completed_episode_names:
+                    logger.info(
+                        '跳过已注册消息 user_id=%s progress=%d/%d episode=%s',
+                        group_id,
+                        index,
+                        total_messages,
+                        episode_name,
+                    )
                     continue
 
-                await graphiti.add_episode(
-                    name=episode_name,
-                    episode_body=f'{message.speaker}: {message.content}',
-                    source=EpisodeType.message,
-                    source_description=request.source_description,
-                    reference_time=message.timestamp,
-                    group_id=group_id,
+                message_start = time()
+                message_input_tokens = usage.input_tokens
+                message_output_tokens = usage.output_tokens
+                logger.info(
+                    '开始注册消息 user_id=%s progress=%d/%d episode=%s',
+                    group_id,
+                    index,
+                    total_messages,
+                    episode_name,
                 )
-                group_progress.append(episode_name)
-                save_register_progress(group_id, group_progress)
+                content_filtered = False
+                try:
+                    await graphiti.add_episode(
+                        name=episode_name,
+                        episode_body=f'{message.speaker}: {message.content}',
+                        source=EpisodeType.message,
+                        source_description=request.source_description,
+                        reference_time=message.timestamp,
+                        group_id=group_id,
+                    )
+                except BadRequestError as exc:
+                    if not is_content_filter_error(exc):
+                        raise
+                    content_filtered = True
+                    logger.warning(
+                        '消息触发 Azure 内容过滤，按已处理跳过 user_id=%s '
+                        'progress=%d/%d episode=%s',
+                        group_id,
+                        index,
+                        total_messages,
+                        episode_name,
+                    )
+                duration_ms = (time() - message_start) * 1000
+                input_tokens = usage.input_tokens - message_input_tokens
+                output_tokens = usage.output_tokens - message_output_tokens
+                progress_item = RegisterProgressItem(
+                    episode_name=episode_name,
+                    duration_ms=duration_ms,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    total_tokens=input_tokens + output_tokens,
+                    completed_at=datetime.now().astimezone(),
+                )
+                append_register_progress(group_id, progress_item)
+                group_progress.append(progress_item)
+                completed_episode_names.add(episode_name)
                 ingested_count += 1
+                if not content_filtered:
+                    logger.info(
+                        '完成注册消息 user_id=%s progress=%d/%d episode=%s '
+                        'duration_ms=%.0f total_tokens=%d',
+                        group_id,
+                        index,
+                        total_messages,
+                        episode_name,
+                        duration_ms,
+                        input_tokens + output_tokens,
+                    )
 
-        return RegisterResponse(
+        result = RegisterResponse(
             user_id=request.user_id,
-            ingested_count=f'{ingested_count}/{len(request.messages)}',
+            ingested_count=f'{ingested_count}/{total_messages}',
             duration_ms=(time() - start) * 1000,
             **usage_fields(usage),
         )
+        logger.info(
+            '完成注册记忆 user_id=%s ingested=%s duration_ms=%.0f total_tokens=%d',
+            group_id,
+            result.ingested_count,
+            result.duration_ms,
+            result.total_tokens,
+        )
+        return result
+    except Exception:
+        logger.exception(
+            '注册记忆失败 user_id=%s ingested=%d/%d duration_ms=%.0f',
+            group_id,
+            ingested_count,
+            total_messages,
+            (time() - start) * 1000,
+        )
+        raise
     finally:
         CURRENT_REQUEST_USAGE.reset(context_token)
 
 
 @app.post('/memory/delete', response_model=ClearMemoryResponse)
 async def clear_memory(request: ClearMemoryRequest, http_request: Request) -> ClearMemoryResponse:
+    logger.info('开始清理记忆 user_id=%s', request.user_id)
     async with get_user_lock(http_request, request.user_id):
         graphiti = await get_user_graphiti(http_request, request.user_id)
         await clear_data(graphiti.driver, group_ids=[request.user_id])
         progress_deleted = delete_register_progress(request.user_id)
 
+    logger.info(
+        '完成清理记忆 user_id=%s progress_deleted=%s',
+        request.user_id,
+        progress_deleted,
+    )
     return ClearMemoryResponse(
         user_id=request.user_id,
         deleted=True,
@@ -602,22 +755,55 @@ async def search(request: SearchRequest, http_request: Request) -> SearchRespons
     usage = RequestUsage()
     context_token = CURRENT_REQUEST_USAGE.set(usage)
     start = time()
+    total_queries = len(request.queries)
+    logger.info('开始搜索记忆 user_id=%s queries=%d', request.user_id, total_queries)
 
     try:
         async with get_user_lock(http_request, request.user_id):
             graphiti = await get_user_graphiti(http_request, request.user_id)
             results: list[SearchQueryResult] = []
-            for query in request.queries:
-                results.append(
-                    await search_context(graphiti, request.user_id, query, SEARCH_RESULT_LIMIT)
+            for index, query in enumerate(request.queries, start=1):
+                logger.info(
+                    '开始搜索问题 user_id=%s progress=%d/%d',
+                    request.user_id,
+                    index,
+                    total_queries,
+                )
+                query_result = await search_context(
+                    graphiti, request.user_id, query, SEARCH_RESULT_LIMIT
+                )
+                results.append(query_result)
+                logger.info(
+                    '完成搜索问题 user_id=%s progress=%d/%d facts=%d nodes=%d duration_ms=%.0f',
+                    request.user_id,
+                    index,
+                    total_queries,
+                    len(query_result.facts),
+                    len(query_result.nodes),
+                    query_result.duration_ms,
                 )
 
-        return SearchResponse(
+        result = SearchResponse(
             user_id=request.user_id,
             results=results,
             duration_ms=(time() - start) * 1000,
             **usage_fields(usage),
         )
+        logger.info(
+            '完成搜索记忆 user_id=%s queries=%d duration_ms=%.0f total_tokens=%d',
+            request.user_id,
+            total_queries,
+            result.duration_ms,
+            result.total_tokens,
+        )
+        return result
+    except Exception:
+        logger.exception(
+            '搜索记忆失败 user_id=%s duration_ms=%.0f',
+            request.user_id,
+            (time() - start) * 1000,
+        )
+        raise
     finally:
         CURRENT_REQUEST_USAGE.reset(context_token)
 
@@ -627,13 +813,21 @@ async def response(request: ResponseRequest, http_request: Request) -> ResponseR
     usage = RequestUsage()
     context_token = CURRENT_REQUEST_USAGE.set(usage)
     start = time()
+    total_questions = len(request.qa)
+    logger.info('开始生成回答 user_id=%s questions=%d', request.user_id, total_questions)
 
     try:
         async with get_user_lock(http_request, request.user_id):
             graphiti = await get_user_graphiti(http_request, request.user_id)
             results: list[ResponseItem] = []
-            for qa in request.qa:
+            for index, qa in enumerate(request.qa, start=1):
                 item_start = time()
+                logger.info(
+                    '开始回答问题 user_id=%s progress=%d/%d',
+                    request.user_id,
+                    index,
+                    total_questions,
+                )
                 search_result = await search_context(
                     graphiti,
                     request.user_id,
@@ -657,13 +851,37 @@ async def response(request: ResponseRequest, http_request: Request) -> ResponseR
                         search_result=search_result,
                     )
                 )
+                logger.info(
+                    '完成回答问题 user_id=%s progress=%d/%d facts=%d nodes=%d duration_ms=%.0f',
+                    request.user_id,
+                    index,
+                    total_questions,
+                    len(search_result.facts),
+                    len(search_result.nodes),
+                    duration_ms,
+                )
 
-        return ResponseResult(
+        result = ResponseResult(
             user_id=request.user_id,
             results=results,
             duration_ms=(time() - start) * 1000,
             total_tokens=usage.total_tokens,
         )
+        logger.info(
+            '完成生成回答 user_id=%s questions=%d duration_ms=%.0f total_tokens=%d',
+            request.user_id,
+            total_questions,
+            result.duration_ms,
+            result.total_tokens,
+        )
+        return result
+    except Exception:
+        logger.exception(
+            '生成回答失败 user_id=%s duration_ms=%.0f',
+            request.user_id,
+            (time() - start) * 1000,
+        )
+        raise
     finally:
         CURRENT_REQUEST_USAGE.reset(context_token)
 
